@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -27,6 +27,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Export static binary
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          target: binary
+          outputs: type=local,dest=out
+      - name: Prepare release assets
+        working-directory: out
+        run: |
+          set -euo pipefail
+
+          mv secnetperf secnetperf-x86_64-unknown-linux-gnu
+          sha256sum secnetperf-x86_64-unknown-linux-gnu \
+            > secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt
       - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
@@ -34,3 +48,32 @@ jobs:
           tags: |
             ghcr.io/firezone/secnetperf:latest
             ghcr.io/firezone/secnetperf:${{ steps.version.outputs.msquic }}
+      - name: Publish GitHub release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MSQUIC_VERSION: ${{ steps.version.outputs.msquic }}
+        run: |
+          set -euo pipefail
+
+          title="secnetperf $MSQUIC_VERSION"
+          notes="Static Linux x86-64 build of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
+
+          if gh release view "$MSQUIC_VERSION" >/dev/null 2>&1; then
+            gh release edit "$MSQUIC_VERSION" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes"
+
+            gh release upload "$MSQUIC_VERSION" \
+              out/secnetperf-x86_64-unknown-linux-gnu \
+              out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
+              --clobber
+          else
+            gh release create "$MSQUIC_VERSION" \
+              out/secnetperf-x86_64-unknown-linux-gnu \
+              out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes"
+          fi
