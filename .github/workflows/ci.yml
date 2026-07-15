@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          title="secnetperf $MSQUIC_VERSION"
+          title="$MSQUIC_VERSION"
           notes="Static Linux x86-64 build of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
 
           if gh release view "$MSQUIC_VERSION" >/dev/null 2>&1; then
