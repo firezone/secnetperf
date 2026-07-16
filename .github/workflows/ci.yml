@@ -10,10 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  linux:
     runs-on: ubuntu-24.04
+    outputs:
+      msquic_version: ${{ steps.version.outputs.msquic }}
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -41,6 +43,15 @@ jobs:
           mv secnetperf secnetperf-x86_64-unknown-linux-gnu
           sha256sum secnetperf-x86_64-unknown-linux-gnu \
             > secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: secnetperf-linux-x86_64
+          path: |
+            out/secnetperf-x86_64-unknown-linux-gnu
+            out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt
+          if-no-files-found: error
+          retention-days: 1
       - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
@@ -48,16 +59,86 @@ jobs:
           tags: |
             ghcr.io/firezone/secnetperf:latest
             ghcr.io/firezone/secnetperf:${{ steps.version.outputs.msquic }}
+
+  windows:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Read pinned msquic version
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Dockerfile -Pattern '^ARG MSQUIC_VERSION=(.+)$'
+          if (-not $match) {
+            throw 'Could not find MSQUIC_VERSION in Dockerfile'
+          }
+
+          "msquic=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+      - name: Clone msquic
+        shell: pwsh
+        env:
+          MSQUIC_VERSION: ${{ steps.version.outputs.msquic }}
+        run: git clone --depth 1 --branch $env:MSQUIC_VERSION https://github.com/microsoft/msquic msquic
+      - name: Configure static Windows build
+        shell: pwsh
+        run: |
+          cmake -S msquic -B msquic/build -A x64 `
+            -DQUIC_BUILD_PERF=ON `
+            -DQUIC_BUILD_SHARED=OFF `
+            -DQUIC_STATIC_LINK_CRT=ON
+      - name: Build secnetperf
+        shell: pwsh
+        run: cmake --build msquic/build --config Release --target secnetperf --parallel
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $asset = 'secnetperf-x86_64-pc-windows-msvc.exe'
+          $source = 'msquic/build/bin/Release/secnetperf.exe'
+          if (-not (Test-Path $source)) {
+            throw "Could not find $source"
+          }
+
+          New-Item -ItemType Directory -Path out | Out-Null
+          Copy-Item $source "out/$asset"
+          $hash = (Get-FileHash "out/$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Out-File "out/$asset.sha256sum.txt" -Encoding ascii
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: secnetperf-windows-x86_64
+          path: |
+            out/secnetperf-x86_64-pc-windows-msvc.exe
+            out/secnetperf-x86_64-pc-windows-msvc.exe.sha256sum.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - linux
+      - windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: secnetperf-*
+          path: out
+          merge-multiple: true
       - name: Publish GitHub release
-        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MSQUIC_VERSION: ${{ steps.version.outputs.msquic }}
+          GH_REPO: ${{ github.repository }}
+          MSQUIC_VERSION: ${{ needs.linux.outputs.msquic_version }}
         run: |
           set -euo pipefail
 
           title="$MSQUIC_VERSION"
-          notes="Static Linux x86-64 build of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
+          notes="Static Linux and Windows x86-64 builds of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
 
           if gh release view "$MSQUIC_VERSION" >/dev/null 2>&1; then
             gh release edit "$MSQUIC_VERSION" \
@@ -68,11 +149,15 @@ jobs:
             gh release upload "$MSQUIC_VERSION" \
               out/secnetperf-x86_64-unknown-linux-gnu \
               out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
+              out/secnetperf-x86_64-pc-windows-msvc.exe \
+              out/secnetperf-x86_64-pc-windows-msvc.exe.sha256sum.txt \
               --clobber
           else
             gh release create "$MSQUIC_VERSION" \
               out/secnetperf-x86_64-unknown-linux-gnu \
               out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
+              out/secnetperf-x86_64-pc-windows-msvc.exe \
+              out/secnetperf-x86_64-pc-windows-msvc.exe.sha256sum.txt \
               --target "$GITHUB_SHA" \
               --title "$title" \
               --notes "$notes"
