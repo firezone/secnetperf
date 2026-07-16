@@ -80,7 +80,9 @@ jobs:
         shell: pwsh
         env:
           MSQUIC_VERSION: ${{ steps.version.outputs.msquic }}
-        run: git clone --depth 1 --branch $env:MSQUIC_VERSION https://github.com/microsoft/msquic msquic
+        run: |
+          git clone --depth 1 --branch $env:MSQUIC_VERSION https://github.com/microsoft/msquic msquic
+          git -C msquic submodule update --init --depth 1 submodules/xdp-for-windows
       - name: Configure static Windows build
         shell: pwsh
         run: |
