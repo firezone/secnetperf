@@ -1,6 +1,6 @@
 FROM ubuntu:24.04 AS build
 
-ARG MSQUIC_VERSION=v2.5.9
+ARG MSQUIC_VERSION=v2.5.10
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates cmake git perl \
