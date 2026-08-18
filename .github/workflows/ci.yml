@@ -85,6 +85,12 @@ jobs:
           git -C msquic submodule update --init --depth 1 submodules/xdp-for-windows
       - name: Configure static Windows build
         shell: pwsh
+        env:
+          # msquic compiles its core with /analyze and /WX, and the MSVC
+          # analyzer on the current runner image reports a C28020 false
+          # positive in crypto_tls.c. Suppress that warning; CMake appends
+          # CFLAGS to its default compiler flags at first configure.
+          CFLAGS: /wd28020
         run: |
           cmake -S msquic -B msquic/build -A x64 `
             -DQUIC_BUILD_PERF=ON `
