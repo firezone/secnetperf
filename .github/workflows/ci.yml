@@ -122,11 +122,79 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Read pinned msquic version
+        id: version
+        run: echo "msquic=$(sed -nE 's/^ARG MSQUIC_VERSION=(.+)$/\1/p' Dockerfile)" >> "$GITHUB_OUTPUT"
+      - name: Clone msquic
+        env:
+          MSQUIC_VERSION: ${{ steps.version.outputs.msquic }}
+        run: |
+          git clone --depth 1 --branch "$MSQUIC_VERSION" https://github.com/microsoft/msquic msquic
+          git -C msquic submodule update --init --depth 1 submodules/quictls
+      - name: Configure static macOS build
+        run: |
+          cmake -S msquic -B msquic/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DQUIC_BUILD_PERF=ON \
+            -DQUIC_BUILD_SHARED=OFF
+      - name: Build secnetperf
+        run: cmake --build msquic/build --config Release --target secnetperf --parallel
+      - name: Verify standalone Apple Silicon binary
+        run: |
+          binary=msquic/build/bin/Release/secnetperf
+          file "$binary"
+          [[ $(lipo -archs "$binary") == arm64 ]]
+          otool -L "$binary" | tee "$RUNNER_TEMP/secnetperf-dependencies.txt"
+          awk 'NR > 1 && $1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\// { exit 1 }' \
+            "$RUNNER_TEMP/secnetperf-dependencies.txt"
+      - name: Smoke test QUIC upload and download
+        run: |
+          set -euo pipefail
+          binary="$PWD/msquic/build/bin/Release/secnetperf"
+          "$binary" -bind:127.0.0.1:4433 -exec:maxtput -maxruntime:15000 > "$RUNNER_TEMP/server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" || true; cat "$RUNNER_TEMP/server.log"' EXIT
+          ready=false
+          for _ in {1..20}; do
+            if lsof -nP -a -p "$server" -iUDP:4433; then ready=true; break; fi
+            sleep 0.25
+          done
+          [[ "$ready" == true ]]
+          for direction in up down; do
+            "$binary" -target:127.0.0.1 -ip:4 -port:4433 -inctarget:0 \
+              -exec:maxtput -conns:1 -streams:1 "-$direction:1s" \
+              -pctput:1 -ptput:1 -maxruntime:5000 | tee "$RUNNER_TEMP/$direction.log"
+            grep -E 'Result: (Upload|Download) [1-9][0-9]* bytes @ [1-9][0-9]* kbps' "$RUNNER_TEMP/$direction.log"
+          done
+      - name: Prepare release assets
+        run: |
+          mkdir -p out
+          cp msquic/build/bin/Release/secnetperf out/secnetperf-aarch64-apple-darwin
+          cd out
+          shasum -a 256 secnetperf-aarch64-apple-darwin > secnetperf-aarch64-apple-darwin.sha256sum.txt
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: secnetperf-macos-arm64
+          path: |
+            out/secnetperf-aarch64-apple-darwin
+            out/secnetperf-aarch64-apple-darwin.sha256sum.txt
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     if: github.ref == 'refs/heads/main'
     needs:
       - linux
       - windows
+      - macos
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -146,7 +214,7 @@ jobs:
           set -euo pipefail
 
           title="$MSQUIC_VERSION"
-          notes="Static Linux and Windows x86-64 builds of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
+          notes="Standalone Linux and Windows x86-64 and macOS arm64 builds of secnetperf from msquic $MSQUIC_VERSION. Assets are refreshed from main and may change without a new tag. Built from $GITHUB_SHA."
 
           if gh release view "$MSQUIC_VERSION" >/dev/null 2>&1; then
             gh release edit "$MSQUIC_VERSION" \
@@ -159,6 +227,8 @@ jobs:
               out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
               out/secnetperf-x86_64-pc-windows-msvc.exe \
               out/secnetperf-x86_64-pc-windows-msvc.exe.sha256sum.txt \
+              out/secnetperf-aarch64-apple-darwin \
+              out/secnetperf-aarch64-apple-darwin.sha256sum.txt \
               --clobber
           else
             gh release create "$MSQUIC_VERSION" \
@@ -166,6 +236,8 @@ jobs:
               out/secnetperf-x86_64-unknown-linux-gnu.sha256sum.txt \
               out/secnetperf-x86_64-pc-windows-msvc.exe \
               out/secnetperf-x86_64-pc-windows-msvc.exe.sha256sum.txt \
+              out/secnetperf-aarch64-apple-darwin \
+              out/secnetperf-aarch64-apple-darwin.sha256sum.txt \
               --target "$GITHUB_SHA" \
               --title "$title" \
               --notes "$notes"
