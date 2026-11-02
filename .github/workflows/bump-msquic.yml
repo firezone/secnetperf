@@ -31,40 +31,27 @@ jobs:
             echo "current=$current"
             echo "latest=$latest"
           } >> "$GITHUB_OUTPUT"
-      - name: Open bump PR
+      - name: Bump msquic
         if: steps.versions.outputs.current != steps.versions.outputs.latest
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PR_BOT_GITHUB_TOKEN }}
-          CURRENT: ${{ steps.versions.outputs.current }}
           LATEST: ${{ steps.versions.outputs.latest }}
-        run: |
-          set -euo pipefail
-
-          branch="chore/bump-msquic-$LATEST"
-
-          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
-            echo "PR for $LATEST is already open; nothing to do."
-            exit 0
-          fi
-
-          sed -i "s/^ARG MSQUIC_VERSION=.*/ARG MSQUIC_VERSION=$LATEST/" Dockerfile
-
-          git config --local user.email "github-bot@firezone.dev"
-          git config --local user.name "Firezone Bot"
-
-          git checkout -b "$branch"
-          git commit -am "chore: bump msquic to $LATEST"
-
-          # The checkout persists the default (read-only) GITHUB_TOKEN as an
-          # http.extraheader, which git sends regardless of the remote URL's
-          # embedded credentials. Clear it so the bot token below is actually
-          # used, letting the PR's checks run (a GITHUB_TOKEN push would not
-          # trigger them).
-          git config --local http.https://github.com/.extraheader ""
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push -u origin HEAD --force
-
-          gh pr create \
-            --title "chore: bump msquic to $LATEST" \
-            --body "Update msquic from $CURRENT to $LATEST: https://github.com/microsoft/msquic/releases/tag/$LATEST" \
-            --reviewer firezone/engineering
+        run: sed -i "s/^ARG MSQUIC_VERSION=.*/ARG MSQUIC_VERSION=$LATEST/" Dockerfile
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        if: steps.versions.outputs.current != steps.versions.outputs.latest
+        with:
+          client-id: ${{ vars.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          repositories: ${{ github.repository }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open bump PR
+        if: steps.versions.outputs.current != steps.versions.outputs.latest
+        uses: firezone/actions/create-pull-request@f92afb7395591f2205bdcfd42b975c8dcf51bb6b # main
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: chore/bump-msquic-${{ steps.versions.outputs.latest }}
+          title: "chore: bump msquic to ${{ steps.versions.outputs.latest }}"
+          body: "Update msquic from ${{ steps.versions.outputs.current }} to ${{ steps.versions.outputs.latest }}: https://github.com/microsoft/msquic/releases/tag/${{ steps.versions.outputs.latest }}"
+          paths: Dockerfile
+          reviewers: firezone/engineering
